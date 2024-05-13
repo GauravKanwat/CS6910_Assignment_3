@@ -103,4 +103,3 @@ for epoch in range(num_epochs):
         optimizer.step()
     
     printf(f"Epoch: {epoch+1}/{num_epochs}, Loss: {total_loss / len(train_loader)}")
-
