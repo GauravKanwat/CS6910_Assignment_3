@@ -1,429 +1,399 @@
-import os
+import numpy as np
 import pandas as pd
-from torch.utils.data import Dataset, DataLoader
-from torchvision.transforms import Compose
-import torch.nn as nn
-
-# Define the Encoder class
-class Encoder(nn.Module):
-    def __init__(self, input_dim, hidden_size, emb_dim, num_layers, bidirectional, cell_type, dropout):
-        super(Encoder, self).__init__()
-        self.hidden_size = hidden_size
-        self.embedding = nn.Embedding(input_dim, emb_dim)
-        self.num_layers = num_layers
-        self.bidirectional = bidirectional
-        self.num_directions = 2 if bidirectional else 1
-        
-        if cell_type == "LSTM":
-            self.rnn = nn.LSTM(emb_dim, hidden_size, num_layers, bidirectional=bidirectional, dropout=dropout)
-        elif cell_type == "GRU":
-            self.rnn = nn.GRU(emb_dim, hidden_size, num_layers, bidirectional=bidirectional, dropout=dropout)
-        elif cell_type == "RNN":
-            self.rnn = nn.RNN(emb_dim, hidden_size, num_layers, bidirectional=bidirectional, dropout=dropout)
-
-    def forward(self, input, cell1=None):
-        embedded = self.dropout(self.embedding(input))
-        if self.cell == "LSTM":
-            output, (hidden, cell1) = self.cell(embedded)
-        else:
-            output, hidden = self.cell(embedded)
-        return output, hidden, cell1 if cell1 is not None else None
-    
-# Define the Decoder class with attention
-class Decoder(nn.Module):
-    def __init__(self, output_dim, hidden_size, num_layers, cell_type, dropout):
-        super(Decoder, self).__init__()
-        self.hidden_size = hidden_size
-        self.output_dim = output_dim
-        self.embedding = nn.Embedding(output_dim, hidden_size)
-        self.num_layers = num_layers
-        
-        if cell_type == "LSTM":
-            self.rnn = nn.LSTM(hidden_size, hidden_size, num_layers, dropout=dropout)
-        elif cell_type == "GRU":
-            self.rnn = nn.GRU(hidden_size, hidden_size, num_layers, dropout=dropout)
-        elif cell_type == "RNN":
-            self.rnn = nn.RNN(hidden_size, hidden_size, num_layers, dropout=dropout)
-        
-        self.fc_out = nn.Linear(hidden_size, output_dim)
-        self.dropout = nn.Dropout(dropout)
-        
-    def forward(self, input, hidden, cell=None):
-        input = input.unsqueeze(0)
-        embedded = self.dropout(self.embedding(input))
-        output, (hidden, cell) = self.rnn(embedded, (hidden, cell))
-        prediction = self.fc_out(output.squeeze(0))
-        return prediction, hidden, cell
-
-class CustomDataset(Dataset):
-    def __init__(self, csv_file, transform=None):
-        self.data = pd.read_csv(csv_file, header=None)
-        self.transform = transform
-    
-    def __len__(self):
-        return len(self.data)
-    
-    def __getitem__(self, idx):
-        sample = self.data.iloc[idx]
-        x, y = sample[0], sample[1]
-        if self.transform is not None:
-            x, y = self.transform(x, y)
-        return x, y
-
-dataset = "./aksharantar_sampled/hin"
-
-# Dataset
-train_dataset = CustomDataset(os.path.join(dataset, f"hin_train.csv"))
-test_dataset = CustomDataset(os.path.join(dataset, f"hin_test.csv"))
-val_dataset = CustomDataset(os.path.join(dataset, f"hin_valid.csv"))
-
-# Create DataLoader objects
-train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
-val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
-
 import torch
-from torch.utils.data import Dataset
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+import matplotlib.pyplot as plt
+from tqdm.auto import tqdm
+from torch.utils.data import DataLoader, Dataset
+import random
+import wandb
+wandb.login(key="0f6963d23192cbab4399ad9ec6e7475c7a0d6345")
 
-SOS_token = '<'
-EOS_token = '>'
+device = "mps" if torch.backends.mps.is_available() else "cpu"
+device
 
-class TransliterationDataset(Dataset):
-    def __init__(self, data_path, split, input_vocab, output_vocab, max_seq_length):
-        self.data_path = data_path
-        self.split = split
-        self.input_vocab = input_vocab
-        self.output_vocab = output_vocab
-        self.max_seq_length = max_seq_length
-        
-        # Load data
-        self.data = self.load_data()
+# Hindi Unicode Hex Range is 2304:2432. Source: https://en.wikipedia.org/wiki/Devanagari_(Unicode_block)
+SOS_token = 0
+EOS_token = 1
+hindi_alphabets = [chr(alpha) for alpha in range(2304, 2432)]
+english_alphabets = [chr(alpha) for alpha in range(97, 123)]
+hindi_alphabet_size = len(hindi_alphabets)
+english_alphabet_size = len(english_alphabets)
+hindi_alpha2index = {"<": 0,">": 1}
+english_alpha2index = {"<": 0,">": 1}
+for index, alpha in enumerate(hindi_alphabets):
+    hindi_alpha2index[alpha] = index+2
+for index, alpha in enumerate(english_alphabets):
+    english_alpha2index[alpha] = index+2
+hindi_index2alpha = {0 : "<", 1 : ">"}
+english_index2alpha = { 0 : "<", 1 : ">"}
+for index, alpha in enumerate(hindi_alphabets):
+    hindi_index2alpha[index+2] = alpha
+for index, alpha in enumerate(english_alphabets):
+    english_index2alpha[index+2] = alpha 
+
+dataset_path = "./aksharantar_sampled/hin/"
+data_train = pd.read_csv(dataset_path + "hin_train.csv",header= None)
+data_train = pd.DataFrame(np.array(data_train),columns=["English","Hindi"])
+data_val = pd.read_csv(dataset_path + "hin_valid.csv",header= None)
+data_val = pd.DataFrame(np.array(data_val),columns=["English","Hindi"])
+data_test = pd.read_csv(dataset_path + "hin_test.csv",header= None)
+data_test = pd.DataFrame(np.array(data_test),columns=["English","Hindi"])
+
+data_train_X = np.array(data_train["English"])
+data_train_y = np.array(data_train["Hindi"])
+
+class Tokenize():
+    def __init__(self,Lang_From,Lang_To):
+        # Hindi Unicode Hex Range is 2304:2432. Source: https://en.wikipedia.org/wiki/Devanagari_(Unicode_block)
+        self.L1 = Lang_From
+        self.L2 = Lang_To
+        self.SOS_token = 0
+        self.EOS_token = 1
+        hindi_alphabets = [chr(alpha) for alpha in range(2304, 2432)]
+        english_alphabets = [chr(alpha) for alpha in range(97, 123)]
+        hindi_alphabet_size = len(hindi_alphabets)
+        english_alphabet_size = len(english_alphabets)
+        hindi_alpha2index = {"<": 0,">": 1}
+        english_alpha2index = {"<": 0,">": 1}
+        for index, alpha in enumerate(hindi_alphabets):
+            hindi_alpha2index[alpha] = index+2
+        for index, alpha in enumerate(english_alphabets):
+            english_alpha2index[alpha] = index+2
+        hindi_index2alpha = {0 : "<", 1 : ">"}
+        english_index2alpha = { 0 : "<", 1 : ">"}
+        for index, alpha in enumerate(hindi_alphabets):
+            hindi_index2alpha[index+2] = alpha
+        for index, alpha in enumerate(english_alphabets):
+            english_index2alpha[index+2] = alpha 
+
+        self.Lang_From_Alpha_2_Index = english_alpha2index
+        self.Lang_To_Alpha_2_Index = hindi_alpha2index
+        self.Lang_From_Index_2_Alpha = english_index2alpha
+        self.Lang_To_Index_2_Alpha = hindi_index2alpha
+
+    def tensorFromWord(self,Lang, word):
+        if Lang == "L1":
+            indexes = [self.Lang_From_Alpha_2_Index[letter] for letter in word]
+        elif Lang == "L2":
+            indexes = [self.SOS_token]+[self.Lang_To_Alpha_2_Index[letter] for letter in word]
+        #print([self.EOS_token]*(30-len(indexes)))
+        indexes+=[self.EOS_token]*(30-len(indexes))
+        return torch.tensor(indexes, dtype=torch.long, device=device)#.view(-1, 1)
+    def tensorsFromPair(self,pair):
+        input_tensor = self.tensorFromWord("L1",pair[self.L1])
+        target_tensor = self.tensorFromWord("L2",pair[self.L2])
+        return (input_tensor, target_tensor)
+    def tensorsFromData(self,Data):
+        Tensors_Val = []
+        for i in tqdm(range(Data.shape[0])):
+            Tensors_Val.append(self.tensorsFromPair(Data.iloc[i]))
+        return Tensors_Val
+    def WordFromtensors(self,Lang, word):
+        if Lang == "L1":
+            letters = [self.Lang_From_Index_2_Alpha[letter.item()] for letter in word if ((letter.item() != EOS_token) and (letter.item() != SOS_token))]
+        elif Lang == "L2":
+            letters = [self.Lang_To_Index_2_Alpha[letter.item()] for letter in word if ((letter.item() != EOS_token) and (letter.item() != SOS_token))]
+        #print([self.EOS_token]*(30-len(indexes)))
+        word = ''.join(letters)
+        return word
+    def PairFromtensors(self,pair):
+        input_word = self.WordFromtensors("L1",pair[0])
+        target_word = self.WordFromtensors("L2",pair[1])
+        return (input_word, target_word)
+    '''def DataFromtensors(self,Data):
+        Tensors_Val = []
+        for i in tqdm(range(Data.shape[0])):
+            Tensors_Val.append(self.PairFromtensors(data_train.iloc[i]))
+        return Tensors_Val'''
+    
+T = Tokenize("English","Hindi")
+data_train_num = T.tensorsFromData(data_train)
+data_val_num = T.tensorsFromData(data_val)
+data_test_num = T.tensorsFromData(data_test)
+
+# Define a custom dataset class
+class CustomDataset(Dataset):
+    def __init__(self, data):
+        self.data = data
 
     def __len__(self):
         return len(self.data)
 
-    def __getitem__(self, index):
-        input_sequence, output_sequence = self.data[index]
-        
-        # Convert input and output sequences to tensors
-        input_tensor = self.sequence_to_tensor(input_sequence, self.input_vocab, self.max_seq_length)
-        output_tensor = self.sequence_to_tensor(output_sequence, self.output_vocab, self.max_seq_length)
-        
-        return {'input_sequence': input_tensor, 'output_sequence': output_tensor}
-
-    def load_data(self):
-        # Load data from CSV file or any other source
-        # Preprocess and return the data as a list of tuples (input_sequence, output_sequence)
-        file_name = f'hin_{self.split}.csv'
-        data = pd.read_csv(os.path.join(self.data_path, file_name), header=None)
-
-        # Preprocess data and create list of tuples (input_sequence, output_sequence)
-        data_tuples = []
-        for row in data.itertuples(index=False):
-            input_sequence, output_sequence = str(row[0]), str(row[1])  # Convert to string in case of numeric data
-            data_tuples.append((input_sequence, output_sequence))
-
-        return data_tuples
-
-    def sequence_to_tensor(self, sequence, vocab, max_seq_length):
-        # Convert sequence of characters to tensor of indices based on vocab
-        # Pad or truncate sequence to max_seq_length
-        tensor = [vocab[SOS_token]] + [vocab[char] for char in sequence]
-        tensor = tensor[:max_seq_length] + [vocab[EOS_token]] * (max_seq_length - len(tensor))
-        return torch.tensor(tensor)
-
-def create_dataset(data_path, split, input_vocab, output_vocab, max_seq_length):
-    dataset = TransliterationDataset(data_path, split, input_vocab, output_vocab, max_seq_length)
-    return dataset
-
-def loadDataset(batch_size):
-    # Define dataset path and splits
-    dataset_path = './aksharantar_sampled/hin/'
-    splits = ['train', 'test', 'valid']
-
-    # Load the dataset and create vocabulary mappings
-    input_characters = set()
-    output_characters = set()
-
-    def create_vocab_mapping(characters):
-        char_to_index = {SOS_token: 0, EOS_token: len(characters)+1}
-        char_to_index.update({char: index+1 for index, char in enumerate(characters)})
-        index_to_char = {index: char for char, index in char_to_index.items()}
-        return char_to_index, index_to_char
-
-
-    for split in splits:
-        file_name = f'hin_{split}.csv'
-        data = pd.read_csv(os.path.join(dataset_path, file_name), header=None)  # Read CSV without headers
-        input_characters.update(set(''.join(data.iloc[:, 0].tolist())))  # Access first column
-        output_characters.update(set(''.join(data.iloc[:, 1].tolist())))  # Access second column
-
-    input_char_to_index, input_index_to_char = create_vocab_mapping(input_characters)             # 26 values
-    output_char_to_index, output_index_to_char = create_vocab_mapping(output_characters)          # 65 values
-
-#     print(input_char_to_index)
-#     print(output_char_to_index)
-
-    # # Define max sequence length
-    # maxLengthEng, maxLengthHin = findMax(datasets['train'])
-    # print(maxLengthEng, maxLengthHin)
-    # max_seq_length = max(maxLengthEng, maxLengthHin) + 5
-    max_seq_length = 30
-
-    # Create datasets for train, test, and validation
-    datasets = {}
-    for split in splits:
-        datasets[split] = create_dataset(dataset_path, split, input_char_to_index, output_char_to_index, max_seq_length)
-
-    # Example usage:
-    train_data = DataLoader(datasets['train'], batch_size=batch_size, shuffle=True)
-    val_data = DataLoader(datasets['valid'], batch_size=batch_size, shuffle=False)
-    test_data = DataLoader(datasets['test'], batch_size=batch_size, shuffle=False)
+    def __getitem__(self, idx):
+        return self.data[idx]
     
-    return train_data, val_data, test_data, input_char_to_index, output_char_to_index, input_index_to_char, output_index_to_char
+train_set=CustomDataset(data_train_num)
+valid_set=CustomDataset(data_val_num)
+test_set=CustomDataset(data_test_num)
 
-def tensor_to_words(tensor, char_to_idx, idx_to_char, SOS_token, EOS_token):
-    words = []
-    for i in range(tensor.size(0)):
-        word = []
-        for j in range(tensor.size(1)):
-            char = idx_to_char[tensor[i][j].item()]
-            if char == SOS_token:
-                continue  # Skip the SOS token
-            if char == EOS_token:
-                break  # Stop at the EOS token
-            word.append(char)
-        words.append(''.join(word))
-    return words
+class Encoder(nn.Module):
+    def __init__(self,input_size,embedding_size,hidden_size,num_layers, dropouts,cell_type,bidirectional):
+        super(Encoder,self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.dropout = nn.Dropout(dropouts)
+        self.embedding = nn.Embedding(input_size,embedding_size)
+        self.cell_type = cell_type
+        self.bidirectional = bidirectional
+        if num_layers >1:
+            if self.cell_type == "LSTM":
+                self.rnn = nn.LSTM(embedding_size,hidden_size,num_layers,dropout=dropouts,bidirectional=self.bidirectional)
+            elif self.cell_type == "RNN":
+                self.rnn = nn.RNN(embedding_size,hidden_size,num_layers,dropout=dropouts,bidirectional=self.bidirectional)
+            elif self.cell_type == "GRU":
+                self.rnn = nn.GRU(embedding_size,hidden_size,num_layers,dropout=dropouts,bidirectional=self.bidirectional)
+        else:
+            if self.cell_type == "LSTM":
+                self.rnn = nn.LSTM(embedding_size,hidden_size,num_layers,bidirectional=self.bidirectional)
+            elif self.cell_type == "RNN":
+                self.rnn = nn.RNN(embedding_size,hidden_size,num_layers,bidirectional=self.bidirectional)
+            elif self.cell_type == "GRU":
+                self.rnn = nn.GRU(embedding_size,hidden_size,num_layers,bidirectional=self.bidirectional)
+                
+    def forward(self,x):
+        # X : (seq_length,N)
+        embedding = self.dropout(self.embedding(x))
+        # embedding : seq_length,N,embedding_size)
+        if self.cell_type == "LSTM":
+            outputs,(hidden,cell) = self.rnn(embedding)
+        else:
+            outputs,hidden = self.rnn(embedding)
+            cell = None
+        return outputs,hidden,cell
+    
+class Decoder(nn.Module):
+    def __init__(self,input_size,embedding_size,hidden_size,output_size,num_layers,dropouts,cell_type,bidirectional):
+        super(Decoder,self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.dropout = nn.Dropout(dropouts)
+        self.embedding = nn.Embedding(input_size,embedding_size)
+        self.cell_type = cell_type
+        self.bidirectional = bidirectional
+        if num_layers>1:            
+            if self.cell_type == "LSTM":
+                self.rnn = nn.LSTM((hidden_size*(1+self.bidirectional*1)+embedding_size),hidden_size,num_layers,dropout=dropouts,bidirectional=self.bidirectional)
+            elif self.cell_type == "RNN":
+                self.rnn = nn.RNN((hidden_size*(1+self.bidirectional*1)+embedding_size),hidden_size,num_layers,dropout=dropouts,bidirectional=self.bidirectional)
+            elif self.cell_type == "GRU":
+                self.rnn = nn.GRU((hidden_size*(1+self.bidirectional*1)+embedding_size),hidden_size,num_layers,dropout=dropouts,bidirectional=self.bidirectional)
+        else:
+            if self.cell_type == "LSTM":
+                self.rnn = nn.LSTM((hidden_size*(1+self.bidirectional*1)+embedding_size),hidden_size,num_layers,bidirectional=self.bidirectional)
+            elif self.cell_type == "RNN":
+                self.rnn = nn.RNN((hidden_size*(1+self.bidirectional*1)+embedding_size),hidden_size,num_layers,bidirectional=self.bidirectional)
+            elif self.cell_type == "GRU":
+                self.rnn = nn.GRU((hidden_size*(1+self.bidirectional*1)+embedding_size),hidden_size,num_layers,bidirectional=self.bidirectional)
+        self.energy = nn.Linear(hidden_size*(2+self.bidirectional*1),1)
+        self.fc = nn.Linear((1+self.bidirectional*1)*hidden_size,output_size)
+        self.weights = nn.Softmax(dim=0)
+        self.relu = nn.ReLU()
+        self.tanh = nn.Tanh()
+        self.softmax = nn.LogSoftmax(dim=1)
+    def forward(self,x,encoder_states,hidden,cell):
+        # x :(N) but we want (1,N)
+        x = x.unsqueeze(0)
+        embedding = self.dropout(self.embedding(x))
+        # embedding : (1,N,embedding_size)
+        sequence_length = encoder_states.shape[0]
+        #print("Seq = ",sequence_length)
+        #print("Enc = ",encoder_states.shape)
+        #print("hidd = ",hidden.shape)
+        h_reshaped = hidden.repeat(int(sequence_length/(1+self.bidirectional)),1,1)
+        #print(int(sequence_length/(1+self.bidirectional)))
+        #print(h_reshaped.shape,encoder_states.shape)
+        energy = self.tanh(self.energy(torch.cat((h_reshaped,encoder_states),dim=2)))
+        attention_weights = self.weights(energy) 
+        # attention : seq_length,N,1
+        attention = attention_weights.permute(1,2,0)
+        # attention : N,1,seq_length
+        encoder_states = encoder_states.permute(1,0,2)
+        # (N,1,hidden_size*2) --> (1,N,hidden_size*2)
+        context_vector = torch.bmm(attention,encoder_states).permute(1,0,2)
+        rnn_input = torch.cat((context_vector,embedding),dim=2)
 
-def word_accuracy(predicted_words, target_words, correct_words, words):
-    for pred_word, target_word in zip(predicted_words, target_words):
-        if pred_word == target_word:
-            # print("pred: ", pred_word, "target: ", target_word)
-            correct_words += 1
-        words += 1
-    return correct_words, words
+        if self.cell_type == "LSTM":
+            outputs,(hidden,cell) = self.rnn(rnn_input,(hidden,cell))
+        else:
+            outputs,hidden = self.rnn(rnn_input,hidden)
+            cell = None
+        # outputs : (1,N,hidden_size)
+        predictions = self.fc(outputs)
+        #predictions : (1,N,output_vocab_size)
+        predictions = self.softmax(predictions[0])
+        #predictions = predictions.squeeze(0)
+        
+        return predictions,hidden,cell,attention_weights
 
-def trainEncoderDecoder(device, model, train_data, val_data, test_data, output_char_to_index, output_index_to_char, num_epochs = 5, lr=0.001):
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr)
+class Seq2Seq(nn.Module):
+    def __init__(self,encoder,decoder):
+        super(Seq2Seq,self).__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+    
+    def forward(self,source,target,teacher_forceing=0.5):
+        batch_size = source.shape[1]
+        self.target_len = target.shape[0]
+        target_vocab_size = len(hindi_alpha2index)
+        
+        outputs = torch.zeros(self.target_len,batch_size,target_vocab_size).to(device)
+        encoder_states,hidden,cell = self.encoder(source)
+        
+        # Start Token
+        x = target[0]
+        for t in range(1,self.target_len):
+            output,hidden,cell,_ = self.decoder(x,encoder_states,hidden,cell)
+            outputs[t] = output
+            best_guess = output.argmax(1)
+            x = target[t] if random.random()<teacher_forceing else best_guess
+        return outputs
+    def predict(self,source,track_attn_weights=False):
+        batch_size = source.shape[1]
+        target_vocab_size = len(hindi_alpha2index)
+        
+        outputs = torch.zeros(self.target_len,batch_size,target_vocab_size).to(device)
+        encoder_states,hidden,cell = self.encoder(source)
+        
+        # Start Token
+        x = 0*source[0]
+        
+        if track_attn_weights == False:
+            Attention_Weights = None
+            for t in range(1,self.target_len):
+                output,hidden,cell,_ = self.decoder(x,encoder_states,hidden,cell)
+                outputs[t] = output
+                best_guess = output.argmax(1)
+                x = best_guess
+        else:
+            Attention_Weights = torch.zeros([batch_size,self.target_len,self.target_len]).to(device)
+            for t in range(1,self.target_len):
+                output,hidden,cell,attention_weights = self.decoder(x,encoder_states,hidden,cell)
+                outputs[t] = output
+                best_guess = output.argmax(1)
+                x = best_guess
+                #print(Attention_Weights.shape,attention_weights.shape)
+                Attention_Weights[:,:,t] = attention_weights.permute(1,0,2).squeeze()
+
+        return outputs, Attention_Weights
+    
+    def find_crct_Tot(self,predicted_batch,target_batch):
+        crct,Total=0,0
+        for i in range(target_batch.shape[0]):
+            Pred = T.WordFromtensors("L2",predicted_batch[i])
+            Targ = T.WordFromtensors("L2",target_batch[i])
+            Total+=1
+            if Pred == Targ:
+                crct +=1
+        return crct,Total
+
+def train_and_tune(config=None):
+  # Initialize a new wandb run
+  with wandb.init(config=config):
+    # If called by wandb.agent, as below,
+    # this config will be set by Sweep Controller
+    config = wandb.config
+    wandb.run.name='emb_dim_'+str(wandb.config.emb_dim)+'_num_enc_layers_'+str(wandb.config.num_enc_layers)+'_num_dec_layers_'+str(wandb.config.num_dec_layers)+'_hs_'+str(wandb.config.hidden_size)+'_cell_type_'+config.cell_type+'_bidirectional_'+str(config.bidirectional)+'_lr_'+str(config.learning_rate)+'_bs_'+str(config.batch_size)+'_dropout_'+str(config.dropout)
+
+
+
+    # Training Params
+    num_epochs = 10
+    learning_rate = config.learning_rate
+    batch_size = config.batch_size
+    train_data_set=DataLoader(train_set, batch_size=batch_size, shuffle=True)
+    valid_data_set=DataLoader(valid_set, batch_size=batch_size, shuffle=False)
+    test_data_set=DataLoader(test_set, batch_size=batch_size, shuffle=False)
+
+    # Model Params
+    input_size_encoder = len(english_alpha2index)
+    input_size_decoder = len(hindi_alpha2index)
+    output_size = len(hindi_alpha2index)
+    emb_dim = config.emb_dim
+    hidden_size = config.hidden_size
+    num_enc_layers = config.num_enc_layers
+    num_dec_layers = config.num_dec_layers
+    enc_dropout = config.dropout
+    dec_dropout = config.dropout
+    cell_type = config.cell_type
+    bidirectional = config.bidirectional
+
+
+    encoder_net = Encoder(input_size_encoder,emb_dim,hidden_size,num_enc_layers,enc_dropout,cell_type,bidirectional).to(device)
+    decoder_net = Decoder(input_size_decoder,emb_dim,hidden_size,output_size,num_enc_layers,dec_dropout,cell_type,bidirectional).to(device)
+
+    model = Seq2Seq(encoder_net, decoder_net).to(device)
+    optimizer = optim.Adam(model.parameters(), lr = learning_rate)
+    pad_idx = EOS_token
+    criterion = nn.CrossEntropyLoss()#ignore_index=pad_idx)
+    Loss_log = []
     for epoch in tqdm(range(num_epochs)):
-        model.train()
-        total_loss = 0.0
-        total_correct_words = 0
-        total_words = 0
-        # Loop through each batch in the train_data
-        for batch in tqdm(train_data):
-            # Zero the gradients
+        epoch_loss = 0
+        for batch in tqdm(train_data_set):
+            inp_data = batch[0].T.to(device)
+            target = batch[1].T.to(device)
+            #print(inp_data.shape)
+            #print(inp_data)
+            output = model(inp_data,target)
+            #output : (trg_len,batch_size,output_dim)
+            output = output[1:].reshape(-1, output.shape[2])
+            target = target[1:].reshape(-1)
+            
             optimizer.zero_grad()
-
-            # Extract input and target sequences from batch
-            input_sequences = batch['input_sequence']
-            target_sequences = batch['output_sequence']
-
-            input_sequences = input_sequences.to(device)
-            target_sequences = target_sequences.to(device)
-
-            # Forward pass: encode input sequences and decode to get predicted output sequences
-            outputs = model(input_sequences, target_sequences)
-
-            # Compute the loss
-            loss = criterion(outputs.view(-1, outputs.shape[-1]), target_sequences.view(-1))
-
-            # Backward pass: compute gradient of the loss with respect to model parameters
+            loss = criterion(output,target)
             loss.backward()
-
-            # Update the parameters of the model
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm = 1)
             optimizer.step()
+            epoch_loss += loss.item()
+        Loss_log.append(epoch_loss)
+        Train_epoch_loss = epoch_loss/len(train_data_set)
 
-            # Add the batch loss to the total loss for this epoch
-            total_loss += loss.item()
+        Predictions_List = []
+        Total = 0
+        crct = 0
+        Val_epoch_loss = 0
+        for batch in tqdm(valid_data_set):
+            inp_data = batch[0].T.to(device)
+            target = batch[1].T.to(device)
+            output,_ = model.predict(inp_data)
+            #print(output_val[2])
+            best_guess = output.argmax(2)
+            predictions = best_guess.squeeze()
+            #print(predictions.shape)
+            output = output[1:].reshape(-1,output.shape[2])
+            target = target[1:].reshape(-1)
+            loss = criterion(output,target)
+            Val_epoch_loss += loss.item()
+            for i in range(batch[1].shape[0]):
+                Pairs_P = T.PairFromtensors((batch[0][i],predictions.T[i]))
+                Pairs_T = T.PairFromtensors((batch[0][i],batch[1][i]))
+                Total+=1
+                if Pairs_P[1] == Pairs_T[1]:
+                    crct +=1
+        Val_epoch_loss=Val_epoch_loss/len(valid_data_set)
+        Val_Accuracy = crct/Total
+        print("train_loss ", Train_epoch_loss,"val_loss ", Val_epoch_loss,"val_accuracy ", (Val_Accuracy * 100))
+        wandb.log({"train_loss":Train_epoch_loss,"val_loss":Val_epoch_loss,"val_accuracy": (Val_Accuracy * 100)})
 
-            # Calculate word accuracy
-            predicted_sequences = outputs.argmax(dim=-1)
-            predicted_words = tensor_to_words(predicted_sequences, output_char_to_index, output_index_to_char, SOS_token, EOS_token)
-            target_words = tensor_to_words(target_sequences, output_char_to_index, output_index_to_char, SOS_token, EOS_token)
-            batch_correct_words, batch_words = word_accuracy(predicted_words, target_words, total_correct_words, total_words)
-            
-            total_correct_words += batch_correct_words
-            total_words += batch_words
-     
-        # Calculate average loss and accuracy for this epoch
-        average_loss = total_loss / len(train_data)
-        accuracy = total_correct_words / total_words
+sweep_config={'method':'bayes',
+              'name':'Sweep on Kaggle',
+              'metric' : {
+                  'name':'val_accuracy',
+                  'goal':'maximize'},
+              'parameters':{ 
+                  'learning_rate':{'values':[0.001,0.0001]},
+                  'batch_size':{'values':[32,64]},
+                  'emb_dim':{'values':[128,256,512]} ,
+                  'num_enc_layers':{'values':[1,2,3]},
+                  'num_dec_layers':{'values':[1,2,3]},
+                  'hidden_size':{'values':[256,512]},
+                  'cell_type':{'values':["RNN","GRU","LSTM"]},
+                  'bidirectional':{'values':[True,False]},
+                  'dropout':{'values':[0.2,0.3]} }}
+# import pprint
+# pprint.pprint(sweep_config)
+sweep_id=wandb.sweep(sweep_config,project="Testing_3")
 
-        # Print average loss and accuracy for this epoch
-        print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {average_loss}, Accuracy: {accuracy * 100}")
-        # wandb.log({"train_loss": average_loss, "train_accuracy": accuracy * 100}, step=epoch)
-
-        # Validation
-        model.eval()
-        val_loss = 0.0
-        val_correct_words = 0
-        val_words = 0
-
-        # Loop through each batch in the val_data
-        for batch in tqdm(val_data):
-            # Extract input and target sequences from batch
-            input_sequences = batch['input_sequence'].to(device)
-            target_sequences = batch['output_sequence'].to(device)
-
-            # Forward pass: encode input sequences and decode to get predicted output sequences
-            outputs = model(input_sequences, target_sequences)
-
-            # Compute the loss
-            loss = criterion(outputs.view(-1, outputs.shape[-1]), target_sequences.view(-1))
-
-            # Add the batch loss to the total loss for this epoch
-            val_loss += loss.item()
-
-            # Calculate accuracy
-            predicted_sequences = outputs.argmax(dim=-1)
-            # predicted_words = tensor_to_words(predicted_sequences, output_char_to_index, output_index_to_char, SOS_token, EOS_token)
-            # target_words = tensor_to_words(target_sequences, output_char_to_index, output_index_to_char, SOS_token, EOS_token)
-            
-            batch_correct_words, batch_words = word_accuracy(predicted_words, target_words, val_correct_words, val_words)
-            
-            val_correct_words += batch_correct_words
-            val_words += batch_words
-  
-        val_average_loss = val_loss / len(val_data)
-        val_accuracy = val_correct_words / val_words
-
-        # Print average loss and accuracy for validation
-        print(f"Epoch [{epoch+1}/{num_epochs}], Validation Loss: {val_average_loss}, Validation Accuracy: {val_accuracy * 100}")
-        # wandb.log({"val_loss": val_average_loss, "val_accuracy": val_accuracy * 100}, step=epoch)
-
-        #testing
-        if epoch == num_epochs-1:
-            model.eval()
-            test_loss = 0.0
-            test_correct_words = 0
-            test_words = 0
-
-            # Loop through each batch in the test DataLoader
-            for batch in tqdm(test_data):
-                # Extract input and target sequences from batch
-                input_sequences = batch['input_sequence'].to(device)
-                target_sequences = batch['output_sequence'].to(device)
-
-                # Forward pass: encode input sequences and decode to get predicted output sequences
-                outputs = model(input_sequences, target_sequences)
-
-                # Compute the loss
-                loss = criterion(outputs.view(-1, outputs.shape[-1]), target_sequences.view(-1))
-
-                # Add the batch loss to the total loss for testing
-                test_loss += loss.item()
-
-                # Calculate accuracy
-                predicted_sequences = outputs.argmax(dim=-1)
-                predicted_words = tensor_to_words(predicted_sequences, output_char_to_index, output_index_to_char, SOS_token, EOS_token)
-                target_words = tensor_to_words(target_sequences, output_char_to_index, output_index_to_char, SOS_token, EOS_token)
-                
-                batch_correct_words, batch_words = word_accuracy(predicted_words, target_words, test_correct_words, test_words)
-                
-                test_correct_words += batch_correct_words
-                test_words += batch_words
-
-            # Calculate average loss and accuracy for testing
-            test_average_loss = test_loss / len(test_data)
-            test_accuracy = test_correct_words / test_words
-
-        #     # Print average loss and accuracy for testing
-            print(f"Epoch [{epoch+1}/{num_epochs}], Test Loss: {test_average_loss}, Test Accuracy: {test_accuracy * 100}")
-        #     # wandb.log({"test_loss": test_average_loss, "test_accuracy": test_accuracy * 100})
-
-def main():
-    # Instantiate the EncoderDecoder
-    batch_size = 32
-    train_data, val_data, test_data, input_char_to_index, output_char_to_index, input_index_to_char, output_index_to_char = loadDataset(batch_size)
-    input_dim = len(input_char_to_index)  # Size of input vocabulary
-    output_dim = len(output_char_to_index)
-    emb_dim = 64
-    hidden_size = 256  #  hidden layer size
-    num_layers = 3  # Number of layers in the encoder and decoder
-    bidirectional = False  # Whether the encoder is bidirectional
-    cell_type = "LSTM"
-    dropout = 0.2
-    num_epochs = 1
-    learning_rate = 0.0001
-    
-    encoder = Encoder(input_dim, hidden_size, emb_dim, num_layers, bidirectional, cell_type, dropout)
-    decoder = Decoder(output_dim, hidden_size, num_layers, cell_type, dropout)
-    
-    model = EncoderDecoder(encoder, decoder, device)
-    model.to(device)
-    
-    trainEncoderDecoder(device, model, train_data, val_data, test_data, output_char_to_index, output_index_to_char, num_epochs, learning_rate)
-    model.to(device)
-    
-    # sweep_config = {
-    #     'method' : 'bayes',
-    #     'project' : "DL_Assignment_3",
-    #     'name' : 'Word accuracy (local)',
-    #     'metric' : {
-    #         'name' : 'val_accuracy', 
-    #         'goal' : 'maximize'
-    #     },
-    #     'parameters' : {
-    #         'emb_dim': {
-    #             'values' : [16, 32, 64]
-    #         },
-    #         'hidden_size': {
-    #             'values' : [128, 256, 512]
-    #         },
-    #         'num_layers' : {
-    #             'values' : [1, 2, 3]
-    #         },
-    #         'bidirectional' : {
-    #             'values' : [True, False]
-    #         },
-    #         'cell_type' : {
-    #             'values' : ["LSTM", "GRU", "RNN"]
-    #         },
-    #         'num_epochs' : {
-    #             'values' : [2, 5, 10]
-    #         },
-    #         'learning_rate': {
-    #             'values' : [1e-3, 1e-4]
-    #         },
-    #         'batch_size': {
-    #             'values' : [16, 32, 64]
-    #         },
-    #         'dropout' : {
-    #             'values' : [0.0, 0.2, 0.4]
-    #         }
-    #     }
-    # }
-
-    # def train():
-    #     with wandb.init(project="DL_Assignment_3") as run:
-
-    #         config = wandb.config
-    #         run_name = "inp_emb_dim_" + str(config.emb_dim) + "_hs_" + str(config.hidden_size) + "_num_enc_layers_" + str(config.num_layers) + "_num_dec_layers_" + str(config.num_layers) + "_bidirectional_" + str(config.bidirectional) + "_cell_type_" + str(config.cell_type) + "_num_epochs_" + str(config.num_epochs) + "_lr_" + str(config.learning_rate) +"_drouput_" + str(config.dropout)
-    #         wandb.run.name = run_name
-            
-    #         train_data, val_data, test_data, input_char_to_index, output_char_to_index, input_index_to_char, output_index_to_char = loadDataset(config.batch_size)
-            
-    #         input_dim = len(input_char_to_index)  # Size of input vocabulary
-    #         output_dim = len(output_char_to_index)
-            
-    #         encoder = Encoder(input_dim, config.hidden_size, config.emb_dim, config.num_layers, 
-    #                           config.bidirectional, config.cell_type, config.dropout)
-    #         decoder = Decoder(output_dim, config.hidden_size, config.num_layers, 
-    #                           config.bidirectional, config.cell_type, config.dropout)
-
-    #         model = EncoderDecoder(encoder, decoder, device)
-    #         model.to(device)
-
-    #         trainEncoderDecoder(device, model, train_data, val_data, test_data, output_char_to_index, output_index_to_char, config.num_epochs, config.learning_rate)
-    #         model.to(device)
-
-    # sweep_id = wandb.sweep(sweep=sweep_config)
-    # wandb.agent(sweep_id, function=train, count=50)
-    # wandb.finish()
-    # train()
-
-if __name__=="__main__":
-    main()
+wandb.agent(sweep_id, train_and_tune,count=1)
