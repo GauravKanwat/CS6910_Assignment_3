@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 from torch.utils.data import DataLoader, Dataset
+import matplotlib
 import matplotlib.pyplot as plt
 import seaborn as sns
 import matplotlib.font_manager as fm
@@ -11,6 +12,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+matplotlib.use('Agg')
 
 import hyperparameter_config
 
@@ -18,8 +20,8 @@ import wandb
 wandb.login(key="0f6963d23192cbab4399ad9ec6e7475c7a0d6345")
 
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-# device = "mps" if torch.backends.mps.is_available() else "cpu"
+# device = "cuda" if torch.cuda.is_available() else "cpu"
+device = "mps" if torch.backends.mps.is_available() else "cpu"
 device
 
 
@@ -28,13 +30,38 @@ hin_start, hin_end = 0x0900, 0x0980
 eng_start, eng_end = 0x0061, 0x007B
 
 
-# generate all characters in a given range and return them as a list
+
 def generate_all_characters(start, end):
+
+    '''
+        Generates all characters in the given range and returns them as a list.
+
+        Args:
+        - start (int): Start of the character range.
+        - end (int): End of the character range.
+
+        Returns:
+        - all_characters (list): List of all characters in the given range.
+    '''
+
     all_characters = [chr(char_code) for char_code in range(start, end)]
     return all_characters
 
 class CreateVocab():
     def __init__(self,input_language,output_language):
+
+        '''
+            Initializes the CreateVocab class with input and output languages.
+
+            Args:
+            - input_language (str): Input language.
+            - output_language (str): Output language.
+
+            Returns:
+            - None
+        '''
+
+        # Initialize parameters
         self.language1 = input_language
         self.language2 = output_language
         self.SOS_token = "<"
@@ -84,8 +111,20 @@ class CreateVocab():
         # loop through the english indexes and add them to the dictionary
         self.updated_out_index_to_char.update({char: index + 2 for index, char in enumerate(english_characters)})
 
-    # Function to convert the word to index
+    
     def word_to_index(self, lang, word):
+        
+        '''
+            Converts a word into its corresponding index tensor for the specified language.
+
+            Args:
+            - lang (str): Language of the word.
+            - word (str): Input word.
+
+            Returns:
+            - indexes (tensor): Index tensor representing the input word.
+        '''
+
         if lang == self.language1:
             word_len = len(word)
             indexes = [self.inp_lang_char_to_index[letter] for letter in word]
@@ -96,24 +135,57 @@ class CreateVocab():
         indexes += [self.EOS_token_index] * (self.max_length - len(indexes))
         return torch.tensor(indexes, dtype=torch.long, device=device)
     
-    # Function to convert the words to indexes
+
     def pair_to_index(self,pair):
+
+        '''
+            Converts a pair of words into their corresponding index tensors.
+
+            Args:
+            - pair (tuple): Tuple containing input and output words.
+
+            Returns:
+            - pairs (tuple): Tuple containing index tensors for input and output words.
+        '''
+
         input_tensor = self.word_to_index(self.language1, pair[self.language1])
         input = input_tensor.view(-1,1)
         target_tensor = self.word_to_index(self.language2, pair[self.language2])
         pairs = (input_tensor, target_tensor)
         return pairs
     
-    # Function to return the pair of words
+
     def return_pair(self, pair):
+
+        '''
+            Returns a pair of words as index tensors.
+
+            Args:
+            - pair (tuple): Tuple containing input and output words.
+
+            Returns:
+            - pairs (tuple): Tuple containing index tensors for input and output words.
+        '''
+
         input_tensor = self.word_to_index(self.language1, pair[0])
         input = input_tensor.view(-1,1)
         target_tensor = self.word_to_index(self.language2, pair[1])
         pairs = (input_tensor, target_tensor)
         return pairs
     
-    # Function to convert the data to indexes
+
     def data_to_index(self, Data):
+
+        '''
+            Converts a dataset of word pairs into index representations.
+
+            Args:
+            - Data (DataFrame): DataFrame containing word pairs.
+
+            Returns:
+            - indexes (list): List of index representations for word pairs.
+        '''
+
         indexes = []
         for i in range(Data.shape[0]):
             index = i
@@ -121,8 +193,20 @@ class CreateVocab():
         print("Data indexing done")
         return indexes
     
-    # Function to convert the indexes to words
+
     def index_to_word(self, Lang, word):
+
+        '''
+            Converts an index tensor back into a word for the specified language.
+
+            Args:
+            - Lang (str): Language of the word.
+            - word (tensor): Index tensor representing the word.
+
+            Returns:
+            - word (str): Word represented by the index tensor.
+        '''
+
         if Lang == self.language1:
             letters = [self.inp_lang_index_to_char[letter.item()] for letter in word if ((letter.item() != self.EOS_token_index) and (letter.item() != self.SOS_token_index))]
         elif Lang == self.language2:
@@ -130,8 +214,19 @@ class CreateVocab():
         word = ''.join(letters)
         return word
     
-    # Function to convert the indexes to pair of words
+
     def index_to_pair(self, pair):
+
+        '''
+            Converts a pair of index tensors back into words.
+
+            Args:
+            - pair (tuple): Tuple containing index tensors for input and output words.
+
+            Returns:
+            - pair (tuple): Tuple containing words corresponding to the index tensors.
+        '''
+
         input_word = self.index_to_word(self.language1, pair[0])
         target_word = self.index_to_word(self.language2, pair[1])
         return (input_word, target_word)
@@ -140,7 +235,24 @@ class CreateVocab():
 
 # -------------- Define the Encoder and Decoder classes ------------------->
 class Encoder(nn.Module):
-    def __init__(self, inp_dim, emb_dim, hidden_size, num_layers, bidirectional,cell_type, dropout):
+    def __init__(self, inp_dim, emb_dim, hidden_size, num_layers, bidirectional, cell_type, dropout):
+
+        '''
+            Initializes the Encoder class with specified parameters.
+
+            Args:
+            - inp_dim (int): Input dimension.
+            - emb_dim (int): Embedding dimension.
+            - hidden_size (int): Size of the hidden state.
+            - num_layers (int): Number of recurrent layers.
+            - bidirectional (bool): Whether the encoder is bidirectional or not.
+            - cell_type (str): Type of RNN cell (LSTM, RNN, GRU).
+            - dropout (float): Dropout probability.
+
+            Returns:
+            - None
+        '''
+
         super(Encoder,self).__init__()
 
         self.inp_dim = inp_dim
@@ -158,8 +270,21 @@ class Encoder(nn.Module):
         elif self.cell_type == "GRU":
             self.rnn = nn.GRU(emb_dim,hidden_size,num_layers,bidirectional=self.bidirectional,dropout=(dropout if num_layers>1 else 0))
 
-    # Forward pass of the encoder returns the encoder states, hidden and cell states
+
     def forward(self,x):
+
+        '''
+            Defines the forward pass of the encoder.
+
+            Args:
+            - x (tensor): Input tensor.
+
+            Returns:
+            - outputs (tensor): Output tensor from the RNN.
+            - hidden (tensor): Hidden state tensor.
+            - cell (tensor): Cell state tensor (only for LSTM).
+        '''
+
         embedding = self.dropout(self.embedding(x))
         if self.cell_type == "LSTM":
             input = embedding
@@ -174,6 +299,24 @@ class Encoder(nn.Module):
     
 class Decoder(nn.Module):
     def __init__(self, inp_dim, emb_dim, hidden_size, output_size, num_layers, bidirectional, cell_type, dropout):
+
+        '''
+            Initializes the Decoder class with specified parameters.
+
+            Args:
+            - inp_dim (int): Input dimension.
+            - emb_dim (int): Embedding dimension.
+            - hidden_size (int): Size of the hidden state.
+            - output_size (int): Size of the output.
+            - num_layers (int): Number of recurrent layers.
+            - bidirectional (bool): Whether the decoder is bidirectional or not.
+            - cell_type (str): Type of RNN cell (LSTM, RNN, GRU).
+            - dropout (float): Dropout probability.
+
+            Returns:
+            - None
+        '''
+
         super(Decoder,self).__init__()
         self.inp_dim = inp_dim
         self.embedding = nn.Embedding(inp_dim,emb_dim)
@@ -201,8 +344,25 @@ class Decoder(nn.Module):
         self.out = nn.Linear(hidden_size * self.num_directions, output_size)
         self.softmax = nn.LogSoftmax(dim=1)
 
-    # Forward pass of the decoder returns the predictions, hidden, cell states and attention weights
+
     def forward(self,x,encoder_states,hidden,cell):
+
+        '''
+            Defines the forward pass of the decoder.
+
+            Args:
+            - x (tensor): Input tensor.
+            - encoder_states (tensor): States from the encoder.
+            - hidden (tensor): Hidden state tensor.
+            - cell (tensor): Cell state tensor (only for LSTM).
+
+            Returns:
+            - predictions (tensor): Output predictions.
+            - hidden (tensor): Hidden state tensor.
+            - cell (tensor): Cell state tensor (only for LSTM).
+            - attention (tensor): Attention weights.
+        '''
+
         x = x.unsqueeze(0)
         self.out = nn.Linear(self.hidden_size * self.num_directions, self.output_size)
         embedding = self.dropout(self.embedding(x))
@@ -218,7 +378,6 @@ class Decoder(nn.Module):
         embedded = embedding.size(2)
         encoder_states = encoder_states.permute(1,0,2)
         
-        # Calculate the context vector
         encoder_context = torch.bmm(attention,encoder_states).permute(1,0,2)
         decoder_context = torch.cat((encoder_context,embedding),dim=2)
         context = torch.bmm(attention,encoder_states).permute(1,0,2)
@@ -237,16 +396,42 @@ class Decoder(nn.Module):
         predictions = self.softmax(predictions[0])
         return predictions, hidden, cell, attention
 
-# Define the Seq2Seq model
+
 class Seq2Seq(nn.Module):
     def __init__(self,encoder,decoder, vocab):
+
+        '''
+            Initializes the Seq2Seq model with an encoder, decoder, and vocabulary.
+
+            Args:
+            - encoder (nn.Module): Encoder module.
+            - decoder (nn.Module): Decoder module.
+            - vocab (CreateVocab): Vocabulary object.
+
+            Returns:
+            - None
+        '''
+
         super(Seq2Seq,self).__init__()
         self.encoder = encoder
         self.decoder = decoder
         self.vocab = vocab
     
-    # Forward pass of the model returns the decoder outputs
+
     def forward(self,source,target,teacher_forcing_ratio=0.5):
+
+        '''
+            Performs the forward pass of the Seq2Seq model.
+
+            Args:
+            - source (tensor): Source input tensor.
+            - target (tensor): Target input tensor.
+            - teacher_forcing_ratio (float): Probability of teacher forcing.
+
+            Returns:
+            - outputs (tensor): Output predictions.
+        '''
+
         self.target_len = target.shape[0]
         batch_size = source.shape[1]
         target_vocab_size = len(self.vocab.out_lang_char_to_index)
@@ -254,7 +439,6 @@ class Seq2Seq(nn.Module):
         outputs = torch.zeros(self.target_len,batch_size,target_vocab_size).to(device)
         encoder_states,hidden,cell = self.encoder(source)
         
-        # Assigning the starting tensor i.e "<" (SOS token) to the input
         x = target[0]
         decoder_input = torch.full((1, batch_size), self.vocab.SOS_token_index, dtype=torch.long)
         batch = x.size(0)
@@ -270,11 +454,22 @@ class Seq2Seq(nn.Module):
             batch = x.size(0)
         return outputs
     
-    # Function to return the total and correct predictions
     def calculate_accuracy(self,predicted_batch,target_batch):
+
+        '''
+            Calculates the accuracy of the predicted batch.
+
+            Args:
+            - predicted_batch (tensor): Predicted batch.
+            - target_batch (tensor): Target batch.
+
+            Returns:
+            - correct (int): Number of correct predictions.
+            - total (int): Total number of predictions.
+        '''
+
         correct,total=0,0
         for i in range(target_batch.shape[0]):
-            # converting the index to words to find the predicted and target words
             predicted = self.vocab.index_to_word(self.language2,predicted_batch[i])
             target = self.vocab.index_to_word(self.language2,target_batch[i])
             total+=1
@@ -282,8 +477,20 @@ class Seq2Seq(nn.Module):
                 crct +=1
         return correct, total
     
-    # Function to return the outputs and attention weights
     def prediction(self, source, attn_weights=False):
+
+        '''
+            Performs prediction using the Seq2Seq model.
+
+            Args:
+            - source (tensor): Source input tensor.
+            - attn_weights (bool): Whether to return attention weights.
+
+            Returns:
+            - outputs (tensor): Output predictions.
+            - Attention_Weights (tensor): Attention weights if `attn_weights` is True, else None.
+        '''
+
         batch_size = source.shape[1]
         target = torch.zeros(1,batch_size).to(device).long()
         target_vocab_size = len(self.vocab.out_lang_char_to_index)
@@ -321,8 +528,21 @@ class Seq2Seq(nn.Module):
         return outputs, Attention_Weights
     
 
-# Initialize the dataset, addition of SOS and EOS tokens and create dictionaries for character to index mapping
 def initializeDataset():
+
+    '''
+        Initializes the dataset by setting up character mappings and loading data.
+
+        Returns:
+        - data_train (DataFrame): Training dataset.
+        - data_val (DataFrame): Validation dataset.
+        - data_test (DataFrame): Test dataset.
+        - input_char_to_index (dict): Mapping of input characters to indices.
+        - output_char_to_index (dict): Mapping of output characters to indices.
+        - SOS_token_index (int): Index of start-of-sequence token.
+        - EOS_token_index (int): Index of end-of-sequence token.
+    '''
+
     SOS_token = "<"
     EOS_token = ">"
     SOS_token_index = 0
@@ -353,8 +573,23 @@ def initializeDataset():
     return data_train, data_val, data_test, input_char_to_index, output_char_to_index, SOS_token_index, EOS_token_index
 
 
-# Function to return the correct and total predictions
 def return_accurate(batch, predictions, vocab, correct, total):
+
+    '''
+        Checks accuracy of predictions against ground truth.
+
+        Args:
+        - batch (tuple): Batch of input-output pairs.
+        - predictions (tensor): Predicted output sequences.
+        - vocab (CreateVocab): Vocabulary object.
+        - correct (int): Number of correctly predicted sequences.
+        - total (int): Total number of sequences.
+
+        Returns:
+        - correct (int): Updated number of correctly predicted sequences.
+        - total (int): Updated total number of sequences.
+    '''
+
     for i in range(batch[1].shape[0]):
         predicted_sequences = vocab.index_to_pair((batch[0][i],predictions.T[i]))
         true_sequences = vocab.index_to_pair((batch[0][i],batch[1][i]))
@@ -364,9 +599,24 @@ def return_accurate(batch, predictions, vocab, correct, total):
     return correct, total
 
 
-# Function to train the model and return the training loss
 def train(data, model, epoch_loss, optimizer, criterion):
+
+    '''
+        Trains the model on the train data.
+
+        Args:
+        - data (DataLoader): Data loader containing input-output pairs.
+        - model (Seq2Seq): Sequence-to-sequence model.
+        - epoch_loss (float): Current epoch loss.
+        - optimizer (Optimizer): Optimization algorithm.
+        - criterion (loss): Loss function.
+
+        Returns:
+        - epoch_loss (float): Updated epoch loss.
+    '''
+
     epoch_loss = 0
+    train_loss = 0
     for batch in tqdm(data):
             target_sequence = batch[1].T.to(device)
             input_sequence = batch[0].T.to(device)
@@ -385,8 +635,23 @@ def train(data, model, epoch_loss, optimizer, criterion):
     return epoch_loss
 
 
-# Function to validate the model and return the correct and total predictions
 def validate(model, criterion, vocab, val_data):
+
+    '''
+        Validates the model using validation data.
+
+        Args:
+        - model (Seq2Seq): Sequence-to-sequence model.
+        - criterion (loss): Loss function.
+        - vocab (CreateVocab): Vocabulary object.
+        - val_data (DataLoader): Data loader containing validation data.
+
+        Returns:
+        - correct (int): Number of correctly predicted sequences.
+        - total (int): Total number of sequences.
+        - epoch_loss (float): Loss for the epoch.
+    '''
+
     total, correct = 0, 0
     epoch_loss = 0
 
@@ -409,8 +674,24 @@ def validate(model, criterion, vocab, val_data):
     return correct, total, epoch_loss
 
 
-# train and validate the model, it initializes training and validation functions and prints the training and validation loss
 def train_and_validate(model, vocab, train_data, val_data, num_epochs, optimizer, criterion):
+
+    '''
+        Trains and validates the model over multiple epochs.
+
+        Args:
+        - model (Seq2Seq): Sequence-to-sequence model.
+        - vocab (CreateVocab): Vocabulary object.
+        - train_data (DataLoader): Data loader containing training data.
+        - val_data (DataLoader): Data loader containing validation data.
+        - num_epochs (int): Number of epochs for training.
+        - optimizer (Optimizer): Optimization algorithm.
+        - criterion (loss): Loss function.
+
+        Returns:
+        - None
+    '''
+
     train_loss = []
     for epoch in tqdm(range(num_epochs)):
         epoch_loss = 0
@@ -425,31 +706,132 @@ def train_and_validate(model, vocab, train_data, val_data, num_epochs, optimizer
         wandb.log({"train_loss":epoch_loss, "val_loss":val_epoch_loss, "val_accuracy": (val_accuracy * 100)})
 
 
-# Define a custom dataset class
+def test(model, criterion, vocab, test_data):
+
+    '''
+        Tests the model using test data.
+
+        Args:
+        - model (Seq2Seq): Sequence-to-sequence model.
+        - criterion (loss): Loss function.
+        - vocab (CreateVocab): Vocabulary object.
+        - test_data (DataLoader): Data loader containing test data.
+
+        Returns:
+        - correct (int): Number of correctly predicted sequences.
+        - total (int): Total number of sequences.
+        - test_loss (float): Loss for the test data.
+    '''
+
+    total, correct = 0, 0
+    test_loss = 0
+
+    for batch in tqdm(test_data):
+        input_sequence = batch[0].T
+        target_sequence = batch[1].T
+        input_sequence, target_sequence = input_sequence.to(device), target_sequence.to(device)
+        x = input_sequence - 1
+        output_sequence, _ = model.prediction(input_sequence)
+        pred_sequence = output_sequence.argmax(2)
+        x = x[1:].reshape(-1)
+        predictions = pred_sequence.squeeze()
+        target_sequence = target_sequence[1:].reshape(-1)
+        output_sequence = output_sequence[1:].reshape(-1,output_sequence.shape[2])
+        x = x[1:].reshape(-1)
+        loss = criterion(output_sequence,target_sequence)
+        test_loss += loss.item()
+        
+        correct, total = return_accurate(batch, predictions, vocab, correct, total)
+    return correct, total, test_loss
+
+
+def perform_testing(model, criterion, vocab, test_data):
+    
+        '''
+            Tests the model using test data.
+    
+            Args:
+            - model (Seq2Seq): Sequence-to-sequence model.
+            - criterion (loss): Loss function.
+            - vocab (CreateVocab): Vocabulary object.
+            - test_data (DataLoader): Data loader containing test data.
+    
+            Returns:
+            - None
+        '''
+        correct, total, test_loss = test(model, criterion, vocab, test_data)
+        test_accuracy = correct/total
+        test_loss = test_loss / len(test_data)
+        print("Test Loss: ", test_loss, "Test Accuracy: ", (test_accuracy * 100))
+
 class CustomDataset(Dataset):
     def __init__(self, data):
+
+        '''
+            Custom dataset class for loading data.
+
+            Args:
+            - data (DataFrame): Input data containing English and Hindi sentences.
+            
+            Returns:
+            - sample (tuple): Tuple containing English and Hindi sentences.
+        '''
+
         self.data = data
         self.transform = None
 
     def __len__(self):
+        '''
+            Returns the length of the dataset
+        '''
         return len(self.data)
 
     def __getitem__(self, idx):
+        '''
+            Returns a sample from the dataset
+        '''
         sample = self.data[idx]
         x, y = sample[0], sample[1]
         if self.transform is not None:
             x, y = self.transform(x, y)
         return self.data[idx]
 
-# Load the dataset using the path and split
+
 def load_dataset(dataset_path, split):
+    '''
+        Loads the dataset from the given path and split.
+
+        Args:
+        - dataset_path (str): Path to the dataset directory.
+        - split (str): Type of split (train, valid, test).
+
+        Returns:
+        - data (DataFrame): Loaded dataset containing English and Hindi sentences.
+    '''
     file_path = os.path.join(dataset_path, f"hin_{split}.csv")
     data = pd.read_csv(file_path, header=None, names=["English", "Hindi"])
     data = data.astype(object).replace(np.nan, '', regex=True)  # Handle NaN values
     return data
 
-# Prepare the data for training, validation and testing
+
 def prepare_data(data_train, data_val, data_test, batch_size):
+    
+    '''
+        Prepares the data for training, validation, and testing.
+
+        Args:
+        - data_train (DataFrame): Training dataset.
+        - data_val (DataFrame): Validation dataset.
+        - data_test (DataFrame): Test dataset.
+        - batch_size (int): Batch size for DataLoader.
+
+        Returns:
+        - train_dataset (DataLoader): DataLoader for training dataset.
+        - valid_dataset (DataLoader): DataLoader for validation dataset.
+        - test_dataset (DataLoader): DataLoader for test dataset.
+        - vocab (CreateVocab): Vocabulary object.
+    '''
+
     vocab = CreateVocab("English","Hindi")
     data_train_num = vocab.data_to_index(data_train)
     data_val_num = vocab.data_to_index(data_val)
@@ -464,9 +846,83 @@ def prepare_data(data_train, data_val, data_test, batch_size):
     return train_dataset, valid_dataset, test_dataset, vocab
 
 
+def create_heatmap(model, vocab, test_data):
+
+    '''
+        Generates attention heatmaps for the test data using the model and logs them to WandB.
+
+        Args:
+            model (nn.Module): Trained sequence-to-sequence model.
+            vocab (CreateVocab): Vocabulary object.
+            test_data (DataLoader): Test data loader.
+
+        Returns:
+            None
+    '''
+
+    indx = 1
+    for batch in test_data:
+            inp_data = batch[0].T.to(device)
+            output_val, Weight = model.prediction(inp_data,True)
+            best_guess = output_val.argmax(2)
+            predictions = best_guess.squeeze()
+            break
+    fig, axes = plt.subplots(nrows=3, ncols=3, figsize=(20, 20))
+    axes = axes.flatten()
+
+    # Path to Devanagari font file
+    hindi_font_path = './Noto_Sans_Devanagari/static/NotoSansDevanagari_Condensed-Regular.ttf'
+    
+    # Load the font
+    hindi_font = fm.FontProperties(fname=hindi_font_path)
+
+    for i, ax in enumerate(axes):
+        if i < 9:  # Plot only the first 9 heatmaps
+            Pairs_P = vocab.index_to_pair((batch[0][i], predictions.T[i]))
+            eng_word = Pairs_P[0]
+            predicted_word = Pairs_P[1]
+            print(eng_word, predicted_word)
+            Mat = Weight[i].cpu().detach().numpy()[1:len(Pairs_P[1])+1,1:len(Pairs_P[0])+1]
+    
+            # im = ax.imshow(Mat, cmap='hot', aspect='auto')
+    
+            # Plot heatmap
+            im = ax.imshow(Mat, cmap='viridis', aspect='auto')
+            cbar = fig.colorbar(im, ax=ax)  # Add color bar
+    
+            # Set x and y tick labels with the custom font
+            ax.set_xticks(np.arange(len(eng_word)))
+            ax.set_yticks(np.arange(len(predicted_word)))
+            ax.set_xticklabels(list(eng_word), fontproperties=hindi_font, fontsize=14)
+            ax.set_yticklabels(list(predicted_word), fontproperties=hindi_font, fontsize=14)
+            
+            # Set title and labels
+            ax.set_title(f'English: {eng_word}\nHindi :{predicted_word}', fontproperties=hindi_font, fontsize=22, pad=20)
+            
+            # ax.set_xlabel('English', fontsize=22)
+            # ax.set_ylabel('Predicted', fontsize=22)
+            ax.tick_params(axis='x', which="major", labelsize=22, pad=10)
+            ax.tick_params(axis='y', which="major", rotation=-90, labelsize=22, pad=10)
+    
+            # Adjust color bar font size
+            cbar.ax.tick_params(labelsize=18)
+            plt.tight_layout()
+            wandb.log({"attention_heatmaps" : plt})
+
+
 def main(args):
 
-    num_epochs = 10              # Number of epochs
+    '''
+        Main function for training the sequence-to-sequence model with hyperparameter sweep.
+
+        Args:
+            args: Command-line arguments.
+
+        Returns:
+            None
+    '''
+
+    num_epochs = 3              # Number of epochs
 
     # Sweep configuration
     sweep_config={
@@ -511,6 +967,12 @@ def main(args):
     
     # Function to run the sweep configuration on training and validation datasets
     def training():
+        '''
+            Function for training the sequence-to-sequence model and logging the plots in WandB.
+
+            Returns:
+                None
+        '''
         with wandb.init():
             config = wandb.config
             wandb.run.name='emb_dim_'+str(wandb.config.emb_dim)+'_num_enc_layers_'+str(wandb.config.num_enc_layers)+'_num_dec_layers_'+str(wandb.config.num_dec_layers)+'_hs_'+str(wandb.config.hidden_size)+'_cell_type_'+config.cell_type+'_bidirectional_'+str(config.bidirectional)+'_lr_'+str(config.learning_rate)+'_bs_'+str(config.batch_size)+'_dropout_'+str(config.dropout)
@@ -524,16 +986,19 @@ def main(args):
             input_encoder = len(input_char_to_index)
             input_decoder = len(output_char_to_index)
             output_size = len(output_char_to_index)
+            
             train_dataset, valid_dataset, test_dataset, vocab = prepare_data(data_train, data_val, data_test, batch_size)
 
             num_enc_layers = config.num_enc_layers
             num_dec_layers = config.num_dec_layers
+            num_enc_layers = 1
             emb_dim = config.emb_dim
             hidden_size = config.hidden_size
             bidirectional = config.bidirectional
             cell_type = config.cell_type.upper()
             dropout = config.dropout
 
+            # Initialize the encoder and decoder
             encoder = Encoder(input_encoder, emb_dim, hidden_size, 
                             num_enc_layers, bidirectional,cell_type, dropout).to(device)
             decoder = Decoder(input_decoder, emb_dim, hidden_size, 
@@ -546,6 +1011,15 @@ def main(args):
 
             # Train and validate the model
             train_and_validate(model, vocab, train_dataset, valid_dataset, num_epochs, optimizer, criterion)
+
+            # Test the model
+            perform_testing(model, criterion, vocab, test_dataset)
+
+            # ---------------- Code for heatmap - uncomment and run when you want to generate heatmaps ---------------->
+            
+            #create_heatmap(model, vocab, test_dataset)
+
+            # --------------------------------------- END ------------------------------------------------------------->
 
     sweep_id=wandb.sweep(sweep_config, project=args.wandb_project, entity=args.wandb_entity)
 
