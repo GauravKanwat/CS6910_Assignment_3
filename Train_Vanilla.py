@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 from torch.utils.data import DataLoader, Dataset
+import matplotlib
 import matplotlib.pyplot as plt
 import seaborn as sns
 import matplotlib.font_manager as fm
