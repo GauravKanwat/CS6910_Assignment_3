@@ -884,8 +884,6 @@ def create_heatmap(model, vocab, test_data):
             print(eng_word, predicted_word)
             Mat = Weight[i].cpu().detach().numpy()[1:len(Pairs_P[1])+1,1:len(Pairs_P[0])+1]
     
-            # im = ax.imshow(Mat, cmap='hot', aspect='auto')
-    
             # Plot heatmap
             im = ax.imshow(Mat, cmap='viridis', aspect='auto')
             cbar = fig.colorbar(im, ax=ax)  # Add color bar
@@ -899,8 +897,6 @@ def create_heatmap(model, vocab, test_data):
             # Set title and labels
             ax.set_title(f'English: {eng_word}\nHindi :{predicted_word}', fontproperties=hindi_font, fontsize=22, pad=20)
             
-            # ax.set_xlabel('English', fontsize=22)
-            # ax.set_ylabel('Predicted', fontsize=22)
             ax.tick_params(axis='x', which="major", labelsize=22, pad=10)
             ax.tick_params(axis='y', which="major", rotation=-90, labelsize=22, pad=10)
     
@@ -976,8 +972,6 @@ def main(args):
         with wandb.init():
             config = wandb.config
             wandb.run.name='emb_dim_'+str(wandb.config.emb_dim)+'_num_enc_layers_'+str(wandb.config.num_enc_layers)+'_num_dec_layers_'+str(wandb.config.num_dec_layers)+'_hs_'+str(wandb.config.hidden_size)+'_cell_type_'+config.cell_type+'_bidirectional_'+str(config.bidirectional)+'_lr_'+str(config.learning_rate)+'_bs_'+str(config.batch_size)+'_dropout_'+str(config.dropout)
-            # learning_rate = 0.001
-            # batch_size = 128
             
             # Defining hyperparameters
             learning_rate = config.learning_rate
