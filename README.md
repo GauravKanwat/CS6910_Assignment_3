@@ -23,6 +23,14 @@ The RNN architecture used in this project consists of an encoder-decoder framewo
 
 - `Train_Attention.py`: Containing function for training the RNN network with attention.
 
+- `requirements.txt`: File containing required libraries for the assignment.
+
+- `aksharantar_sampled`: Dataset used for the RNN network.
+
+- `predictions_attention`: Folder containing predictions (csv) on validation and test datasets.
+
+- `Noto_Sans_Devanagari`: Folder containing the fonts used for the heatmap entries.
+
 <br>
 
 ### Usage
