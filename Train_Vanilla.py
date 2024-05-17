@@ -784,7 +784,7 @@ def main(args):
             None
     '''
 
-    num_epochs = 3              # Number of epochs
+    num_epochs = 10              # Number of epochs
 
     # Sweep configuration
     sweep_config={
